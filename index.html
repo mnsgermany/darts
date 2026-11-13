@@ -38,7 +38,6 @@
   .btn { display: inline-flex; align-items: center; min-height: 44px; padding: 0 16px; border-radius: 14px; border: 3px solid var(--border); cursor: pointer; }
   .sr { position: absolute; opacity: 0; width: 1px; height: 1px; }
   .sr:focus-visible + .btn { outline: 3px solid var(--accent); outline-offset: 2px; }
-  #zoom { width: 160px; min-height: 44px; }
   button { background: var(--accent); color: var(--on-accent); border-color: #0004; font-weight: 700; box-shadow: 0 4px 0 #0008; transition: transform .15s ease-out; }
   button:active { transform: translateY(3px); box-shadow: 0 1px 0 #0008; }
   :focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
@@ -55,11 +54,6 @@
   <label for="players">Игроков:</label>
   <select id="players"><option>1<option selected>2<option>3<option>4</select>
   <button id="restart">Новая игра</button>
-</div>
-<div class="row" id="editor" hidden>
-  <label for="zoom">Масштаб:</label>
-  <input id="zoom" type="range" min="0.5" max="4" step="0.01" value="1">
-  <button id="done">Готово</button>
 </div>
 <div class="row">
   <input id="file" type="file" accept="image/*" class="sr">
@@ -82,9 +76,11 @@ console.assert(score(BULL.x, BULL.y) === 50 && score(BULL.x + 0.15 * S, BULL.y) 
 const cv = document.getElementById('board'), g = cv.getContext('2d');
 const $ = id => document.getElementById(id);
 const PHOTO_KEY = 'darts-photo';
-const saved = (() => { try { return localStorage.getItem(PHOTO_KEY); } catch { return null; } })();
+const FACE_KEY = 'darts-face';
+const load = k => { try { return localStorage.getItem(k); } catch { return null; } };
+const saved = load(PHOTO_KEY), savedMouth = saved && JSON.parse(load(FACE_KEY) || 'null');
 const img = new Image(); img.src = saved || 'photo.jpg';
-let edit = null, drag = null; // edit = { src, x, y, z } — подгонка загруженного фото под метки лица
+let edit = null, drag = null; // edit = { src, pts } — разметка загруженного фото: тапы по глазам и рту
 const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
 const FLY = 900; // мс полёта дротика
 let st, aim = { x: S / 2, y: S / 2 }, pop = null, fly = null, rage = null, aiming = false, closeUntil = 0;
@@ -210,7 +206,14 @@ function face(t) {
 }
 
 // координаты черт лица на photo.jpg в системе канваса 800×800; при замене фото — переставить
-const FACE = { eyes: [[304, 338], [498, 333]], brows: [[307, 298, 1], [500, 294, -1]], nose: [400, 410], mouth: [404, 533], jaw: [404, 585] };
+const DEFAULT_FACE = { eyes: [[304, 338], [498, 333]], brows: [[307, 298, 1], [500, 294, -1]], nose: [400, 410], mouth: [404, 533], jaw: [404, 585] };
+
+const EYES = [[304, 336], [498, 336]]; // куда встают глаза загруженного фото
+const faceFrom = ([mx, my]) => ({ // черты лица по положению рта: глаза уже стоят на EYES
+  eyes: EYES, brows: EYES.map(([x, y], i) => [x, y - 40, i ? -1 : 1]),
+  nose: [mx, EYES[0][1] + 0.38 * (my - EYES[0][1])], mouth: [mx, my], jaw: [mx, my + 52],
+});
+let FACE = savedMouth ? faceFrom(savedMouth) : DEFAULT_FACE;
 
 function warp(cx, cy, rx, ry, tf) { // локальная деформация без швов: вложенные эллипсы, сила f растёт к центру
   const N = 12;
@@ -232,21 +235,41 @@ function hud() {
     : `Раунд ${Math.floor(st.thrown / (DARTS * n)) + 1}/${ROUNDS} · Игрок ${who + 1} · дротик ${st.thrown % DARTS + 1}/${DARTS}`;
 }
 
-function paintPhoto(c) { // фото с текущим сдвигом и масштабом; z = 1 — заполняет квадрат целиком
-  const { src, x, y, z } = edit, k = Math.max(S / src.naturalWidth, S / src.naturalHeight) * z;
-  const w = src.naturalWidth * k, h = src.naturalHeight * k;
-  c.fillStyle = '#444'; c.fillRect(0, 0, S, S); c.drawImage(src, x - w / 2, y - h / 2, w, h);
+const STEPS = ['Тапни по одному глазу', 'Теперь по второму глазу', 'И по середине рта'];
+// фото вписано в холст целиком, чтобы до лица можно было дотянуться пальцем
+function fit(src) {
+  const k = Math.min(S / src.naturalWidth, S / src.naturalHeight);
+  return { k, x: (S - src.naturalWidth * k) / 2, y: (S - src.naturalHeight * k) / 2 };
 }
 
-function drawEditor() { // метки, куда поставить глаза и рот, чтобы мимика попала в лицо
-  paintPhoto(g);
-  g.save(); g.setLineDash([12, 9]); g.lineWidth = 4; g.strokeStyle = '#fff'; g.shadowColor = '#000'; g.shadowBlur = 6;
-  for (const [x, y] of FACE.eyes) { g.beginPath(); g.ellipse(x, y, 46, 28, 0, 0, 7); g.stroke(); }
-  const [mx, my] = FACE.mouth;
-  g.beginPath(); g.moveTo(mx - 70, my); g.lineTo(mx + 70, my); g.stroke();
-  g.font = 'bold 24px system-ui'; g.fillStyle = '#fff'; g.textAlign = 'center';
-  g.fillText('глаза', S / 2, FACE.eyes[0][1] - 50); g.fillText('рот', mx, my + 40);
-  g.restore();
+function drawEditor() {
+  const { src, pts } = edit, f = fit(src);
+  g.fillStyle = '#17121f'; g.fillRect(0, 0, S, S);
+  g.drawImage(src, f.x, f.y, src.naturalWidth * f.k, src.naturalHeight * f.k);
+  for (const [x, y] of pts) { // отметки уже поставленных точек
+    g.beginPath(); g.arc(x * f.k + f.x, y * f.k + f.y, 14, 0, 7);
+    g.lineWidth = 8; g.strokeStyle = '#000'; g.stroke(); g.lineWidth = 4; g.strokeStyle = '#f59e0b'; g.stroke();
+  }
+}
+
+function tapFace(e) { // точки храним в пикселях исходного фото
+  const r = cv.getBoundingClientRect(), f = fit(edit.src);
+  edit.pts.push([((e.clientX - r.left) / r.width * S - f.x) / f.k, ((e.clientY - r.top) / r.height * S - f.y) / f.k]);
+  if (edit.pts.length < 3) { $('status').textContent = STEPS[edit.pts.length]; return; }
+  const [a, b] = edit.pts.slice(0, 2).sort((p, q) => p[0] - q[0]), m = edit.pts[2], dist = Math.hypot(b[0] - a[0], b[1] - a[1]);
+  if (dist * f.k < 20) { edit.pts = []; $('status').textContent = 'Глаза слишком близко — ещё раз. ' + STEPS[0]; return; }
+  // по двум глазам считаем поворот, масштаб и сдвиг: глаза встают на EYES, рот — куда придётся
+  const [L, R] = EYES, k = (R[0] - L[0]) / dist, rot = -Math.atan2(b[1] - a[1], b[0] - a[0]);
+  const c = document.createElement('canvas'); c.width = c.height = S; // отдельный холст: основной может быть «запачкан» файлом с диска
+  const x = c.getContext('2d');
+  x.fillStyle = '#444'; x.fillRect(0, 0, S, S);
+  x.translate(L[0], L[1]); x.rotate(rot); x.scale(k, k); x.translate(-a[0], -a[1]);
+  x.drawImage(edit.src, 0, 0);
+  const cos = Math.cos(rot), sin = Math.sin(rot), dx = m[0] - a[0], dy = m[1] - a[1];
+  const mouth = [L[0] + k * (dx * cos - dy * sin), L[1] + k * (dx * sin + dy * cos)];
+  const url = c.toDataURL('image/jpeg', 0.85);
+  try { localStorage.setItem(PHOTO_KEY, url); localStorage.setItem(FACE_KEY, JSON.stringify(mouth)); } catch {} // приватный режим или нет места — фото просто не запомнится
+  FACE = faceFrom(mouth); img.src = url; edit = null; reset();
 }
 
 // мишень висит далеко; вид задаётся как { s, cx, cy, ox, oy }: точка мишени b рисуется в (b - c) * s + o
@@ -329,16 +352,13 @@ function pull(e) { // жест → куда прилетит: вбок — на�
   aim = { x: S / 2 + (e.clientX - drag.x) * q * 1.6, y: S + 150 - up * 1.6 }; // до центра — жест почти в полэкрана
 }
 cv.addEventListener('pointerdown', e => {
+  if (edit) return tapFace(e);
   drag = { x: e.clientX, y: e.clientY }; cv.setPointerCapture(e.pointerId);
   if (canThrow()) { aiming = true; pull(e); }
 });
 cv.addEventListener('pointermove', e => {
   if (!drag) return;
-  if (edit) {
-    const q = S / cv.getBoundingClientRect().width;
-    edit.x += (e.clientX - drag.x) * q; edit.y += (e.clientY - drag.y) * q;
-    drag = { x: e.clientX, y: e.clientY };
-  } else if (aiming) pull(e);
+  if (aiming) pull(e);
 });
 cv.addEventListener('pointerup', () => {
   if (!edit && aiming && drag) drag.power >= 40 ? throwDart() : aiming = false; // слишком короткий жест — не бросок
@@ -347,8 +367,7 @@ cv.addEventListener('pointerup', () => {
 cv.addEventListener('pointercancel', () => { drag = null; aiming = false; });
 cv.addEventListener('keydown', e => {
   const k = { ArrowLeft: [-20, 0], ArrowRight: [20, 0], ArrowUp: [0, -20], ArrowDown: [0, 20] }[e.key];
-  if (k && edit) { edit.x += k[0]; edit.y += k[1]; }
-  else if (k) { if (canThrow()) { aiming = true; aim = { x: aim.x + k[0], y: aim.y + k[1] }; } }
+  if (k) { if (canThrow()) { aiming = true; aim = { x: aim.x + k[0], y: aim.y + k[1] }; } }
   else if (e.key === ' ' || e.key === 'Enter') { if (aiming) throwDart(); }
   else return;
   e.preventDefault();
@@ -359,21 +378,12 @@ $('file').onchange = e => {
   if (!f) return;
   const src = new Image();
   src.onload = () => {
-    edit = { src, x: S / 2, y: S / 2, z: 1 };
-    $('zoom').value = 1; $('editor').hidden = false;
-    $('status').textContent = 'Двигай фото и крути масштаб: глаза и рот — на метки';
+    edit = { src, pts: [] }; drag = null; aiming = false;
+    $('status').textContent = STEPS[0];
   };
   src.onerror = () => { $('status').textContent = 'Не получилось открыть это фото'; };
   src.src = URL.createObjectURL(f);
   e.target.value = '';
-};
-$('zoom').oninput = e => { if (edit) edit.z = +e.target.value; };
-$('done').onclick = () => {
-  const c = document.createElement('canvas'); c.width = c.height = S; // отдельный холст: основной может быть «запачкан» файлом с диска
-  paintPhoto(c.getContext('2d'));
-  const url = c.toDataURL('image/jpeg', 0.85);
-  try { localStorage.setItem(PHOTO_KEY, url); } catch {} // приватный режим или нет места — фото просто не запомнится
-  img.src = url; edit = null; $('editor').hidden = true; reset();
 };
 document.getElementById('restart').onclick = reset;
 document.getElementById('players').onchange = reset;
