@@ -1,0 +1,335 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Дартс</title>
+<style>
+  :root {
+    --bg: #17121f; --card: #241c31; --fg: #f8f4ff; --muted: #b3a8c9;
+    --accent: #f59e0b; --on-accent: #0f172a; --border: #3a2e4f;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100dvh; background: var(--bg); color: var(--fg);
+    font: 16px/1.5 ui-rounded, "SF Pro Rounded", system-ui, sans-serif;
+    display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 16px;
+  }
+  h1 { margin: 0; font-size: 1.5rem; }
+  .card {
+    background: var(--card); border: 3px solid var(--border); border-radius: 20px;
+    box-shadow: 0 6px 0 #0008; padding: 12px 16px; width: min(100%, 560px);
+  }
+  #status { font-weight: 700; font-size: 1.1rem; text-align: center; min-height: 1.5em; }
+  #board {
+    width: min(100%, 560px, 70dvh); aspect-ratio: 1; display: block; padding: 0;
+    border-radius: 50%; border: 3px solid var(--border); box-shadow: 0 6px 0 #0008;
+    cursor: crosshair; touch-action: none;
+  }
+  #scores { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; list-style: none; margin: 0; padding: 0; }
+  #scores li { padding: 4px 12px; border-radius: 12px; border: 3px solid var(--c); color: var(--fg); }
+  #scores li.turn { background: var(--c); color: var(--on-accent); font-weight: 700; }
+  .row { display: flex; gap: 12px; align-items: center; justify-content: center; flex-wrap: wrap; }
+  select, button {
+    font: inherit; min-height: 44px; padding: 0 16px; border-radius: 14px;
+    border: 3px solid var(--border); background: var(--bg); color: var(--fg); cursor: pointer;
+  }
+  [hidden] { display: none !important; }
+  .btn { display: inline-flex; align-items: center; min-height: 44px; padding: 0 16px; border-radius: 14px; border: 3px solid var(--border); cursor: pointer; }
+  .sr { position: absolute; opacity: 0; width: 1px; height: 1px; }
+  .sr:focus-visible + .btn { outline: 3px solid var(--accent); outline-offset: 2px; }
+  #zoom { width: 160px; min-height: 44px; }
+  button { background: var(--accent); color: var(--on-accent); border-color: #0004; font-weight: 700; box-shadow: 0 4px 0 #0008; transition: transform .15s ease-out; }
+  button:active { transform: translateY(3px); box-shadow: 0 1px 0 #0008; }
+  :focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+  .hint { color: var(--muted); font-size: .875rem; text-align: center; margin: 0; }
+</style>
+</head>
+<body>
+<h1>Дартс</h1>
+<div class="card"><div id="status" aria-live="polite">Скрипты здесь отключены — игра не запустится</div></div>
+<canvas id="board" width="800" height="800" tabindex="0" role="img"
+  aria-label="Мишень. Наведи прицел и кликни, чтобы бросить дротик"></canvas>
+<div class="card"><ul id="scores"></ul></div>
+<div class="row">
+  <label for="players">Игроков:</label>
+  <select id="players"><option>1<option selected>2<option>3<option>4</select>
+  <button id="restart">Новая игра</button>
+</div>
+<div class="row" id="editor" hidden>
+  <label for="zoom">Масштаб:</label>
+  <input id="zoom" type="range" min="0.5" max="4" step="0.01" value="1">
+  <button id="done">Готово</button>
+</div>
+<div class="row">
+  <input id="file" type="file" accept="image/*" class="sr">
+  <label class="btn" for="file">Загрузить своё фото</label>
+</div>
+<p class="hint">Прицел дрожит — лови момент и кликай. 3 дротика за ход, 3 раунда. С клавиатуры: стрелки и пробел.</p>
+
+<script>
+const S = 800, DARTS = 3, ROUNDS = 3;
+const BULL = { x: 0.5 * S, y: 0.5 * S };             // фото обрезано так, что нос в центре
+const RINGS = [[0.04, 50], [0.11, 25], [0.21, 10], [0.34, 5], [0.5, 1]]; // [радиус в долях S, очки]
+const COLORS = ['#f59e0b', '#ec4899', '#22d3ee', '#a3e635'];
+
+const score = (x, y) => {
+  const d = Math.hypot(x - BULL.x, y - BULL.y) / S;
+  return (RINGS.find(([r]) => d <= r) || [0, 0])[1];
+};
+console.assert(score(BULL.x, BULL.y) === 50 && score(BULL.x + 0.15 * S, BULL.y) === 10 && score(0, S) === 0, 'score() сломан');
+
+const cv = document.getElementById('board'), g = cv.getContext('2d');
+const $ = id => document.getElementById(id);
+const PHOTO_KEY = 'darts-photo';
+const saved = (() => { try { return localStorage.getItem(PHOTO_KEY); } catch { return null; } })();
+const img = new Image(); img.src = saved || 'photo.jpg';
+let edit = null, drag = null; // edit = { src, x, y, z } — подгонка загруженного фото под метки лица
+const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+const FLY = 380; // мс полёта дротика
+let st, aim = { x: S / 2, y: S / 2 }, pop = null, fly = null, rage = null;
+
+function reset() {
+  const n = +document.getElementById('players').value;
+  st = { totals: Array(n).fill(0), darts: [], thrown: 0, over: false };
+  pop = fly = rage = null; hud();
+}
+const turn = () => Math.floor(st.thrown / DARTS) % st.totals.length;
+
+function sway(t) { // дрожание руки
+  const a = reduce ? 0 : 0.055 * S;
+  return { x: aim.x + a * Math.sin(t / 310) * Math.cos(t / 730), y: aim.y + a * Math.sin(t / 270 + 1.3) };
+}
+
+function throwDart() {
+  if (st.over || fly || edit) return;
+  ac ||= new AudioContext(); ac.resume(); // звук разрешён только из жеста пользователя
+  if (screamBuf === undefined) {
+    screamBuf = null;
+    fetch(SCREAM_SRC).then(r => r.arrayBuffer()).then(b => ac.decodeAudioData(b)).then(b => screamBuf = b).catch(() => {});
+  }
+  const now = performance.now();
+  fly ={ ...sway(now), who: turn(), t0: now };
+  if (reduce) land(now);
+}
+
+function land(t) {
+  const { x, y, who } = fly, pts = score(x, y);
+  fly = null;
+  st.darts.push({ x, y, who }); st.totals[who] += pts; st.thrown++;
+  pop = { x, y, text: pts ? '+' + pts : 'мимо', until: t + 900 };
+  const k = Math.sqrt(pts / 50); // сила возмущения: 1 очко ≈ 0.14, яблочко = 1
+  if (pts) { rage = { k, t0: t, dur: 500 + 1100 * k }; ouch(k); }
+  st.over = st.thrown >= DARTS * ROUNDS * st.totals.length;
+  hud();
+}
+
+const SCREAM_SRC = 'scream.mp3'; // «крик Вильгельма», CC0, Викисклад; сборка единого файла вшивает его как data:-ссылку
+let ac, screamBuf;
+function ouch(k) {
+  if (!screamBuf) return synthOuch(k); // запись не загрузилась (index.html открыт с диска — fetch запрещён)
+  const src = ac.createBufferSource(), v = ac.createGain(), t = ac.currentTime;
+  const d = screamBuf.duration * (0.35 + 0.65 * k), vol = 0.25 + 0.75 * k; // слабое попадание — короткий тихий вскрик
+  src.buffer = screamBuf;
+  v.gain.setValueAtTime(vol, t); v.gain.setValueAtTime(vol, t + d * 0.8); v.gain.exponentialRampToValueAtTime(0.0001, t + d);
+  src.connect(v).connect(ac.destination); src.start(t); src.stop(t + d);
+}
+
+// запасной синтезированный крик (пилы + перегруз + форманты)
+function synthOuch(k) {
+  const t = ac.currentTime, d = 0.45 + 0.9 * k, top = 330 + 220 * k; // чем больнее, тем выше и дольше орёт
+  const out = ac.createGain(), drive = ac.createWaveShaper(), srcs = [];
+  drive.curve = Float32Array.from({ length: 256 }, (_, i) => Math.tanh((i / 128 - 1) * 4)); // перегруз = хрип
+  const lfo = ac.createOscillator(), depth = ac.createGain();                              // надрыв: голос дрожит
+  lfo.frequency.value = 31; depth.gain.value = 18 + 30 * k; lfo.connect(depth); srcs.push(lfo);
+  for (const cents of [0, 14]) {                                                           // связки: две расстроенные пилы
+    const o = ac.createOscillator(); o.type = 'sawtooth'; o.detune.value = cents;
+    o.frequency.setValueAtTime(190, t);
+    o.frequency.exponentialRampToValueAtTime(top, t + 0.07);     // вскрик вверх
+    o.frequency.linearRampToValueAtTime(top * 0.96, t + d * 0.55);
+    o.frequency.exponentialRampToValueAtTime(170, t + d);        // выдыхается вниз
+    depth.connect(o.frequency); o.connect(drive); srcs.push(o);
+  }
+  const noise = ac.createBufferSource(), nb = ac.createBuffer(1, Math.ceil(ac.sampleRate * d), ac.sampleRate); // воздух в крике
+  nb.getChannelData(0).forEach((_, i, a) => a[i] = Math.random() * 2 - 1);
+  noise.buffer = nb; const ng = ac.createGain(); ng.gain.value = 0.25; noise.connect(ng).connect(drive); srcs.push(noise);
+  for (const [f, gain] of [[800, 1], [1250, 0.8], [2800, 0.4]]) {                          // форманты открытого «А»
+    const b = ac.createBiquadFilter(), bg = ac.createGain(); b.type = 'bandpass'; b.frequency.value = f; b.Q.value = 5; bg.gain.value = gain;
+    drive.connect(b).connect(bg).connect(out);
+  }
+  out.gain.setValueAtTime(0.0001, t);
+  out.gain.exponentialRampToValueAtTime(0.35 + 0.5 * k, t + 0.04);
+  out.gain.setValueAtTime(0.35 + 0.5 * k, t + d * 0.6);
+  out.gain.exponentialRampToValueAtTime(0.0001, t + d);
+  out.connect(ac.destination);
+  for (const s of srcs) { s.start(t); s.stop(t + d); }
+}
+
+function dart(x, y, color, s = 1) { // остриё в (x, y), хвост уходит вправо-вниз
+  const line = (a, b, w, c) => { g.lineWidth = w; g.strokeStyle = c; g.beginPath(); g.moveTo(a, 0); g.lineTo(b, 0); g.stroke(); };
+  g.save(); g.translate(x, y); g.rotate(Math.PI / 4); g.scale(s, s); g.lineCap = 'round';
+  line(0, 22, 3, '#e4e4e7');                        // игла
+  line(22, 52, 10, '#111'); line(22, 52, 6, color);  // корпус
+  line(52, 76, 3, '#111');                          // хвостовик
+  g.beginPath(); g.moveTo(64, 0); g.lineTo(82, -14); g.lineTo(92, -14); g.lineTo(80, 0); g.lineTo(92, 14); g.lineTo(82, 14); g.closePath();
+  g.fillStyle = color; g.fill(); g.lineWidth = 2; g.strokeStyle = '#111'; g.stroke(); // оперение
+  g.restore();
+}
+
+function face(t) {
+  g.fillStyle = '#444'; g.fillRect(0, 0, S, S);
+  if (!img.complete || !img.naturalWidth) {
+    g.font = 'bold 34px system-ui'; g.fillStyle = '#fff'; g.textAlign = 'center';
+    g.fillText('Загрузи фото кнопкой ниже', S / 2, S * 0.82);
+    return;
+  }
+  g.drawImage(img, 0, 0, S, S);
+  const e = rage ? Math.max(0, 1 - (t - rage.t0) / rage.dur) : 0;
+  if (!e) return;
+  const a = rage.k * Math.min(1, 3 * e, 0.2 + 8 * (1 - e));   // резко вспыхивает, держится, отпускает
+  const shake = reduce ? 0 : 4 * a * Math.sin(t / 18);        // дрожь от злости
+  const F = FACE;
+  // челюсть отвисает
+  warp(F.jaw[0], F.jaw[1], 135, 95, f => g.translate(shake * f, 60 * a * f));
+  // глаза навыкате
+  for (const [x, y] of F.eyes) warp(x, y, 52, 36, f => about(x, y, () => g.scale(1 + 0.5 * a * f, 1 + 0.5 * a * f)));
+  // брови сходятся к переносице
+  for (const [x, y, dir] of F.brows) warp(x, y, 80, 34, f => about(x, y, () => { g.translate(0, 16 * a * f); g.rotate(0.32 * a * f * dir); }));
+  // краснеет
+  const bl = g.createRadialGradient(F.nose[0], F.nose[1], 40, F.nose[0], F.nose[1], 300);
+  bl.addColorStop(0, `rgba(220,38,38,${0.45 * a})`); bl.addColorStop(1, 'rgba(220,38,38,0)');
+  g.fillStyle = bl; g.fillRect(0, 0, S, S);
+  // открытый в крике рот
+  const [mx, my] = F.mouth, ry = 4 + 22 * a, cy = my + 16 * a;
+  g.save(); g.beginPath(); g.ellipse(mx + shake, cy, 60 + 10 * a, ry, 0, 0, 7); g.clip();
+  g.fillStyle = '#3b0a0a'; g.fillRect(0, 0, S, S);
+  g.fillStyle = '#f4f1ea'; g.fillRect(mx - 46 + shake, cy - ry, 92, ry * 0.45); // зубы
+  g.restore();
+}
+
+// координаты черт лица на photo.jpg в системе канваса 800×800; при замене фото — переставить
+const FACE = { eyes: [[304, 338], [498, 333]], brows: [[307, 298, 1], [500, 294, -1]], nose: [400, 410], mouth: [404, 533], jaw: [404, 585] };
+
+function warp(cx, cy, rx, ry, tf) { // локальная деформация без швов: вложенные эллипсы, сила f растёт к центру
+  const N = 12;
+  for (let i = 1; i <= N; i++) {
+    const s = 1 - (i - 1) / N;
+    g.save(); g.beginPath(); g.ellipse(cx, cy, rx * s, ry * s, 0, 0, 7); g.clip();
+    tf(i / N); g.drawImage(img, 0, 0, S, S); g.restore();
+  }
+}
+function about(cx, cy, f) { g.translate(cx, cy); f(); g.translate(-cx, -cy); }
+
+function hud() {
+  const who = turn(), n = st.totals.length, best = Math.max(...st.totals);
+  document.getElementById('scores').innerHTML = st.totals.map((t, i) =>
+    `<li style="--c:${COLORS[i]}" class="${!st.over && i === who ? 'turn' : ''}">Игрок ${i + 1}: ${t}</li>`).join('');
+  const winners = st.totals.flatMap((t, i) => t === best ? ['Игрок ' + (i + 1)] : []);
+  document.getElementById('status').textContent = st.over
+    ? (n === 1 ? `Итог: ${best}` : winners.length > 1 ? `Ничья: ${winners.join(', ')} — по ${best}` : `Победил ${winners[0]} — ${best} очков!`)
+    : `Раунд ${Math.floor(st.thrown / (DARTS * n)) + 1}/${ROUNDS} · Игрок ${who + 1} · дротик ${st.thrown % DARTS + 1}/${DARTS}`;
+}
+
+function paintPhoto(c) { // фото с текущим сдвигом и масштабом; z = 1 — заполняет квадрат целиком
+  const { src, x, y, z } = edit, k = Math.max(S / src.naturalWidth, S / src.naturalHeight) * z;
+  const w = src.naturalWidth * k, h = src.naturalHeight * k;
+  c.fillStyle = '#444'; c.fillRect(0, 0, S, S); c.drawImage(src, x - w / 2, y - h / 2, w, h);
+}
+
+function drawEditor() { // метки, куда поставить глаза и рот, чтобы мимика попала в лицо
+  paintPhoto(g);
+  g.save(); g.setLineDash([12, 9]); g.lineWidth = 4; g.strokeStyle = '#fff'; g.shadowColor = '#000'; g.shadowBlur = 6;
+  for (const [x, y] of FACE.eyes) { g.beginPath(); g.ellipse(x, y, 46, 28, 0, 0, 7); g.stroke(); }
+  const [mx, my] = FACE.mouth;
+  g.beginPath(); g.moveTo(mx - 70, my); g.lineTo(mx + 70, my); g.stroke();
+  g.font = 'bold 24px system-ui'; g.fillStyle = '#fff'; g.textAlign = 'center';
+  g.fillText('глаза', S / 2, FACE.eyes[0][1] - 50); g.fillText('рот', mx, my + 40);
+  g.restore();
+}
+
+function draw(t) {
+  if (edit) return drawEditor();
+  if (fly && t - fly.t0 >= FLY) land(t);
+  face(t);
+  g.textAlign = 'center'; g.textBaseline = 'middle';
+  [...RINGS].reverse().forEach(([r, pts], i) => {
+    g.beginPath(); g.arc(BULL.x, BULL.y, r * S, 0, 7);
+    g.fillStyle = i % 2 ? '#ffffff22' : '#dc262633'; g.fill();
+    g.lineWidth = 3; g.strokeStyle = '#fffc'; g.stroke();
+    g.font = 'bold 22px system-ui'; g.fillStyle = '#fff'; g.strokeStyle = '#000'; g.lineWidth = 4;
+    if (pts < 50) { g.strokeText(pts, BULL.x + r * S - 22, BULL.y); g.fillText(pts, BULL.x + r * S - 22, BULL.y); }
+  });
+  for (const d of st.darts) dart(d.x, d.y, COLORS[d.who]);
+  if (fly) { // летит на нас снизу-справа, уменьшаясь, по дуге
+    const p = Math.max(0, (t - fly.t0) / FLY), r = 1 - p;
+    dart(fly.x + 160 * r, fly.y + 420 * r - 90 * Math.sin(Math.PI * p), COLORS[fly.who], 1 + 2.5 * r);
+  }
+  if (pop && t < pop.until) {
+    g.font = 'bold 44px system-ui'; g.lineWidth = 6; g.strokeStyle = '#000'; g.fillStyle = '#fff';
+    const y = pop.y - 30 - (reduce ? 0 : 40 * (1 - (pop.until - t) / 900));
+    g.strokeText(pop.text, pop.x, y); g.fillText(pop.text, pop.x, y);
+  }
+  if (!st.over && !fly) {
+    const p = sway(t); g.lineWidth = 3; g.strokeStyle = COLORS[turn()];
+    g.beginPath(); g.arc(p.x, p.y, 20, 0, 7);
+    g.moveTo(p.x - 32, p.y); g.lineTo(p.x + 32, p.y); g.moveTo(p.x, p.y - 32); g.lineTo(p.x, p.y + 32); g.stroke();
+  }
+}
+
+function setAim(e) {
+  const r = cv.getBoundingClientRect();
+  aim = { x: (e.clientX - r.left) / r.width * S, y: (e.clientY - r.top) / r.height * S };
+}
+cv.addEventListener('pointermove', e => {
+  if (!edit) return setAim(e);
+  if (!drag) return;
+  const q = S / cv.getBoundingClientRect().width;
+  edit.x += (e.clientX - drag.x) * q; edit.y += (e.clientY - drag.y) * q;
+  drag = { x: e.clientX, y: e.clientY };
+});
+cv.addEventListener('pointerdown', e => {
+  if (edit) { drag = { x: e.clientX, y: e.clientY }; cv.setPointerCapture(e.pointerId); return; }
+  setAim(e); throwDart();
+});
+for (const ev of ['pointerup', 'pointercancel']) cv.addEventListener(ev, () => { drag = null; });
+cv.addEventListener('keydown', e => {
+  const k = { ArrowLeft: [-20, 0], ArrowRight: [20, 0], ArrowUp: [0, -20], ArrowDown: [0, 20] }[e.key];
+  if (k && edit) { edit.x += k[0]; edit.y += k[1]; }
+  else if (k) { aim.x = Math.min(S, Math.max(0, aim.x + k[0])); aim.y = Math.min(S, Math.max(0, aim.y + k[1])); }
+  else if (e.key === ' ' || e.key === 'Enter') throwDart();
+  else return;
+  e.preventDefault();
+});
+
+$('file').onchange = e => {
+  const f = e.target.files[0];
+  if (!f) return;
+  const src = new Image();
+  src.onload = () => {
+    edit = { src, x: S / 2, y: S / 2, z: 1 };
+    $('zoom').value = 1; $('editor').hidden = false;
+    $('status').textContent = 'Двигай фото и крути масштаб: глаза и рот — на метки';
+  };
+  src.onerror = () => { $('status').textContent = 'Не получилось открыть это фото'; };
+  src.src = URL.createObjectURL(f);
+  e.target.value = '';
+};
+$('zoom').oninput = e => { if (edit) edit.z = +e.target.value; };
+$('done').onclick = () => {
+  const c = document.createElement('canvas'); c.width = c.height = S; // отдельный холст: основной может быть «запачкан» файлом с диска
+  paintPhoto(c.getContext('2d'));
+  const url = c.toDataURL('image/jpeg', 0.85);
+  try { localStorage.setItem(PHOTO_KEY, url); } catch {} // приватный режим или нет места — фото просто не запомнится
+  img.src = url; edit = null; $('editor').hidden = true; reset();
+};
+document.getElementById('restart').onclick = reset;
+document.getElementById('players').onchange = reset;
+onerror = (m, _, line) => { document.getElementById('status').textContent = `Ошибка: ${m} (строка ${line})`; };
+reset();
+// во встроенных просмотрщиках (Телеграм) rAF может не тикать — тогда рисуем по таймеру
+let rafAlive = false;
+(function loop(t) { if (t) { rafAlive = true; draw(t); } requestAnimationFrame(loop); })();
+setInterval(() => { if (!rafAlive) draw(performance.now()); rafAlive = false; }, 33);
+</script>
+</body>
+</html>
