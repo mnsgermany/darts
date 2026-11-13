@@ -23,7 +23,7 @@
   #status { font-weight: 700; font-size: 1.1rem; text-align: center; min-height: 1.5em; }
   #board {
     width: min(100%, 560px, 70dvh); aspect-ratio: 1; display: block; padding: 0;
-    border-radius: 50%; border: 3px solid var(--border); box-shadow: 0 6px 0 #0008;
+    border-radius: 20px; border: 3px solid var(--border); box-shadow: 0 6px 0 #0008;
     cursor: crosshair; touch-action: none;
   }
   #scores { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; list-style: none; margin: 0; padding: 0; }
@@ -49,7 +49,7 @@
 <h1>Дартс</h1>
 <div class="card"><div id="status" aria-live="polite">Скрипты здесь отключены — игра не запустится</div></div>
 <canvas id="board" width="800" height="800" tabindex="0" role="img"
-  aria-label="Мишень. Наведи прицел и кликни, чтобы бросить дротик"></canvas>
+  aria-label="Мишень вдалеке. Потяни вверх и отпусти, чтобы бросить дротик"></canvas>
 <div class="card"><ul id="scores"></ul></div>
 <div class="row">
   <label for="players">Игроков:</label>
@@ -65,7 +65,7 @@
   <input id="file" type="file" accept="image/*" class="sr">
   <label class="btn" for="file">Загрузить своё фото</label>
 </div>
-<p class="hint">Прицел дрожит — лови момент и кликай. 3 дротика за ход, 3 раунда. С клавиатуры: стрелки и пробел.</p>
+<p class="hint">Тяни по экрану вверх и отпускай: длина жеста — сила, вбок — направление. Рука дрожит. 3 дротика за ход, 3 раунда. С клавиатуры: стрелки и пробел.</p>
 
 <script>
 const S = 800, DARTS = 3, ROUNDS = 3;
@@ -86,13 +86,13 @@ const saved = (() => { try { return localStorage.getItem(PHOTO_KEY); } catch { r
 const img = new Image(); img.src = saved || 'photo.jpg';
 let edit = null, drag = null; // edit = { src, x, y, z } — подгонка загруженного фото под метки лица
 const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
-const FLY = 380; // мс полёта дротика
-let st, aim = { x: S / 2, y: S / 2 }, pop = null, fly = null, rage = null;
+const FLY = 900; // мс полёта дротика
+let st, aim = { x: S / 2, y: S / 2 }, pop = null, fly = null, rage = null, aiming = false, closeUntil = 0;
 
 function reset() {
   const n = +document.getElementById('players').value;
   st = { totals: Array(n).fill(0), darts: [], thrown: 0, over: false };
-  pop = fly = rage = null; hud();
+  pop = fly = rage = null; aiming = false; closeUntil = 0; aim = { x: S / 2, y: S / 2 }; hud();
 }
 const turn = () => Math.floor(st.thrown / DARTS) % st.totals.length;
 
@@ -102,14 +102,14 @@ function sway(t) { // дрожание руки
 }
 
 function throwDart() {
-  if (st.over || fly || edit) return;
+  if (!canThrow()) return;
   ac ||= new AudioContext(); ac.resume(); // звук разрешён только из жеста пользователя
   if (screamBuf === undefined) {
     screamBuf = null;
     fetch(SCREAM_SRC).then(r => r.arrayBuffer()).then(b => ac.decodeAudioData(b)).then(b => screamBuf = b).catch(() => {});
   }
   const now = performance.now();
-  fly ={ ...sway(now), who: turn(), t0: now };
+  fly = { ...sway(now), who: turn(), t0: now }; aiming = false;
   if (reduce) land(now);
 }
 
@@ -120,6 +120,8 @@ function land(t) {
   pop = { x, y, text: pts ? '+' + pts : 'мимо', until: t + 900 };
   const k = Math.sqrt(pts / 50); // сила возмущения: 1 очко ≈ 0.14, яблочко = 1
   if (pts) { rage = { k, t0: t, dur: 500 + 1100 * k }; ouch(k); }
+  closeUntil = t + (pts ? rage.dur + 400 : 1100); // держим крупный план, пока идёт реакция
+  aim = { x: S / 2, y: S / 2 };
   st.over = st.thrown >= DARTS * ROUNDS * st.totals.length;
   hud();
 }
@@ -165,9 +167,9 @@ function synthOuch(k) {
   for (const s of srcs) { s.start(t); s.stop(t + d); }
 }
 
-function dart(x, y, color, s = 1) { // остриё в (x, y), хвост уходит вправо-вниз
+function dart(x, y, color, s = 1, rot = Math.PI / 4) { // остриё в (x, y), хвост уходит вправо-вниз
   const line = (a, b, w, c) => { g.lineWidth = w; g.strokeStyle = c; g.beginPath(); g.moveTo(a, 0); g.lineTo(b, 0); g.stroke(); };
-  g.save(); g.translate(x, y); g.rotate(Math.PI / 4); g.scale(s, s); g.lineCap = 'round';
+  g.save(); g.translate(x, y); g.rotate(rot); g.scale(s, s); g.lineCap = 'round';
   line(0, 22, 3, '#e4e4e7');                        // игла
   line(22, 52, 10, '#111'); line(22, 52, 6, color);  // корпус
   line(52, 76, 3, '#111');                          // хвостовик
@@ -247,9 +249,24 @@ function drawEditor() { // метки, куда поставить глаза и
   g.restore();
 }
 
-function draw(t) {
-  if (edit) return drawEditor();
-  if (fly && t - fly.t0 >= FLY) land(t);
+// мишень висит далеко; вид задаётся как { s, cx, cy, ox, oy }: точка мишени b рисуется в (b - c) * s + o
+const FAR = { s: 0.4, cx: S / 2, cy: S / 2, ox: S / 2, oy: S * 0.36 };
+const CLOSE = { s: 1, cx: S / 2, cy: S / 2, ox: S / 2, oy: S / 2 };
+const HAND = { x: S / 2, y: S * 0.8 };
+const toScreen = (v, x, y) => [(x - v.cx) * v.s + v.ox, (y - v.cy) * v.s + v.oy];
+const canThrow = () => !st.over && !fly && !edit && performance.now() >= closeUntil;
+
+function flightView(p) { // камера на носу дротика: разгоняется и влетает в точку попадания
+  const e = p ** 2.2, L = (a, b) => a + (b - a) * e, bob = reduce ? 0 : 1;
+  return {
+    s: FAR.s * (3 / FAR.s) ** e, cx: L(FAR.cx, fly.x), cy: L(FAR.cy, fly.y),
+    ox: L(FAR.ox, S / 2), oy: L(FAR.oy, S / 2) - 70 * Math.sin(Math.PI * p) * bob, // дуга полёта
+    roll: 0.07 * Math.sin(p * 10) * (1 - p) * bob,                                 // дротик покачивается
+  };
+}
+
+function board(t) { // сама мишень в своих координатах 800×800
+  g.save(); g.beginPath(); g.arc(S / 2, S / 2, S / 2, 0, 7); g.clip();
   face(t);
   g.textAlign = 'center'; g.textBaseline = 'middle';
   [...RINGS].reverse().forEach(([r, pts], i) => {
@@ -259,44 +276,80 @@ function draw(t) {
     g.font = 'bold 22px system-ui'; g.fillStyle = '#fff'; g.strokeStyle = '#000'; g.lineWidth = 4;
     if (pts < 50) { g.strokeText(pts, BULL.x + r * S - 22, BULL.y); g.fillText(pts, BULL.x + r * S - 22, BULL.y); }
   });
+  g.restore();
+  g.beginPath(); g.arc(S / 2, S / 2, S / 2 - 5, 0, 7); g.lineWidth = 10; g.strokeStyle = '#0d0a12'; g.stroke(); // обод
   for (const d of st.darts) dart(d.x, d.y, COLORS[d.who]);
-  if (fly) { // летит на нас снизу-справа, уменьшаясь, по дуге
-    const p = Math.max(0, (t - fly.t0) / FLY), r = 1 - p;
-    dart(fly.x + 160 * r, fly.y + 420 * r - 90 * Math.sin(Math.PI * p), COLORS[fly.who], 1 + 2.5 * r);
-  }
   if (pop && t < pop.until) {
     g.font = 'bold 44px system-ui'; g.lineWidth = 6; g.strokeStyle = '#000'; g.fillStyle = '#fff';
     const y = pop.y - 30 - (reduce ? 0 : 40 * (1 - (pop.until - t) / 900));
     g.strokeText(pop.text, pop.x, y); g.fillText(pop.text, pop.x, y);
   }
-  if (!st.over && !fly) {
-    const p = sway(t); g.lineWidth = 3; g.strokeStyle = COLORS[turn()];
-    g.beginPath(); g.arc(p.x, p.y, 20, 0, 7);
-    g.moveTo(p.x - 32, p.y); g.lineTo(p.x + 32, p.y); g.moveTo(p.x, p.y - 32); g.lineTo(p.x, p.y + 32); g.stroke();
-  }
 }
 
-function setAim(e) {
-  const r = cv.getBoundingClientRect();
-  aim = { x: (e.clientX - r.left) / r.width * S, y: (e.clientY - r.top) / r.height * S };
+function aimOverlay(t) { // дротик в руке и пунктир траектории до места, куда он прилетит
+  const tip = [HAND.x, HAND.y], c = COLORS[turn()];
+  dart(tip[0], tip[1], c, 1.8, Math.PI / 2);
+  if (!aiming) {
+    g.font = 'bold 30px system-ui'; g.fillStyle = '#fff'; g.textAlign = 'center';
+    g.fillText('Тяни вверх и отпускай', S / 2, S * 0.68);
+    return;
+  }
+  const p = sway(t), [x, y] = toScreen(FAR, p.x, p.y);
+  g.save(); g.strokeStyle = c; g.lineCap = 'round';
+  g.setLineDash([4, 14]); g.lineWidth = 5;
+  g.beginPath(); g.moveTo(tip[0], tip[1]); g.quadraticCurveTo((tip[0] + x) / 2, Math.min(tip[1], y) - 180, x, y); g.stroke();
+  g.setLineDash([]); g.lineWidth = 3; g.beginPath(); g.arc(x, y, 9, 0, 7); g.stroke();
+  g.restore();
 }
-cv.addEventListener('pointermove', e => {
-  if (!edit) return setAim(e);
-  if (!drag) return;
-  const q = S / cv.getBoundingClientRect().width;
-  edit.x += (e.clientX - drag.x) * q; edit.y += (e.clientY - drag.y) * q;
-  drag = { x: e.clientX, y: e.clientY };
-});
+
+function nose(p) { // остриё дротика перед «глазами» во время полёта
+  const w = reduce ? 0 : 6 * Math.sin(p * 40);
+  g.beginPath(); g.moveTo(S / 2 - 16, S); g.lineTo(S / 2 + 16, S); g.lineTo(S / 2 + w, S * 0.66); g.closePath();
+  g.fillStyle = '#cfd3da'; g.fill(); g.lineWidth = 2; g.strokeStyle = '#111'; g.stroke();
+}
+
+function draw(t) {
+  if (edit) return drawEditor();
+  if (fly && t - fly.t0 >= FLY) land(t);
+  const close = st.over || t < closeUntil, p = fly ? Math.max(0, (t - fly.t0) / FLY) : 0;
+  const v = fly ? flightView(p) : close ? CLOSE : FAR;
+  g.fillStyle = '#2a2136'; g.fillRect(0, 0, S, S); // стена
+  g.save();
+  if (v.roll) about(S / 2, S / 2, () => g.rotate(v.roll));
+  g.translate(v.ox, v.oy); g.scale(v.s, v.s); g.translate(-v.cx, -v.cy);
+  board(t);
+  g.restore();
+  if (fly) nose(p);
+  else if (!close) aimOverlay(t);
+}
+
+function pull(e) { // жест → куда прилетит: вбок — направление, длина вверх — сила
+  const q = S / cv.getBoundingClientRect().width, up = (drag.y - e.clientY) * q;
+  drag.power = up;
+  aim = { x: S / 2 + (e.clientX - drag.x) * q * 1.6, y: S + 150 - up * 1.6 }; // до центра — жест почти в полэкрана
+}
 cv.addEventListener('pointerdown', e => {
-  if (edit) { drag = { x: e.clientX, y: e.clientY }; cv.setPointerCapture(e.pointerId); return; }
-  setAim(e); throwDart();
+  drag = { x: e.clientX, y: e.clientY }; cv.setPointerCapture(e.pointerId);
+  if (canThrow()) { aiming = true; pull(e); }
 });
-for (const ev of ['pointerup', 'pointercancel']) cv.addEventListener(ev, () => { drag = null; });
+cv.addEventListener('pointermove', e => {
+  if (!drag) return;
+  if (edit) {
+    const q = S / cv.getBoundingClientRect().width;
+    edit.x += (e.clientX - drag.x) * q; edit.y += (e.clientY - drag.y) * q;
+    drag = { x: e.clientX, y: e.clientY };
+  } else if (aiming) pull(e);
+});
+cv.addEventListener('pointerup', () => {
+  if (!edit && aiming && drag) drag.power >= 40 ? throwDart() : aiming = false; // слишком короткий жест — не бросок
+  drag = null;
+});
+cv.addEventListener('pointercancel', () => { drag = null; aiming = false; });
 cv.addEventListener('keydown', e => {
   const k = { ArrowLeft: [-20, 0], ArrowRight: [20, 0], ArrowUp: [0, -20], ArrowDown: [0, 20] }[e.key];
   if (k && edit) { edit.x += k[0]; edit.y += k[1]; }
-  else if (k) { aim.x = Math.min(S, Math.max(0, aim.x + k[0])); aim.y = Math.min(S, Math.max(0, aim.y + k[1])); }
-  else if (e.key === ' ' || e.key === 'Enter') throwDart();
+  else if (k) { if (canThrow()) { aiming = true; aim = { x: aim.x + k[0], y: aim.y + k[1] }; } }
+  else if (e.key === ' ' || e.key === 'Enter') { if (aiming) throwDart(); }
   else return;
   e.preventDefault();
 });
